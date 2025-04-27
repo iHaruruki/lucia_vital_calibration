@@ -1,15 +1,11 @@
 #
 ### Node and Topic
-```mermaid
-flowchart LR
-    A(["/"]) ==> B["/"]
-```
 ## Dependency
 
 ## Setup
 ```
 $ cd ~/ros2_ws/src  #Go to ros workspace
-$ git clone  #clone this package
+$ git clone https://github.com/iHaruruki/lucia_vital_calibration.git #clone this package
 $ cd ~/ros2_ws
 $ colcon build --symlink-install
 $ source install/setup.bash
@@ -17,7 +13,7 @@ $ source install/setup.bash
 
 ## Usage
 ```
-$ ros2 run lucia_controller lucia_controller_node
+$ ros2 run lucia_vital_calibration lucia_vital_calibration
 ```
 ## License
 ## Authors
