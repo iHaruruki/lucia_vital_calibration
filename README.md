@@ -13,6 +13,7 @@ $ source install/setup.bash
 
 ## Usage
 ```
+$ sudo chmod 777 /dev/ttyUSB0
 $ ros2 run lucia_vital_calibration lucia_vital_calibration
 ```
 ### Request calibration command
