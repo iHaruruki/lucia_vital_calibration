@@ -2,118 +2,115 @@
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
-#include <vector>
-#include <iomanip>
-#include <sstream>
 #include <thread>
 #include <chrono>
+#include <vector>
+#include <array>
+#include <sstream>
 
-class VitalCalibrator : public rclcpp::Node
+class VitalRequester : public rclcpp::Node
 {
 public:
-  VitalCalibrator()
-  : Node("vital_calibrator")
+  VitalRequester()
+  : Node("vital_requester")
   {
-    // パラメータ読み取り
+    // ポートとボーレート
     this->declare_parameter<std::string>("port", "/dev/ttyUSB0");
     this->declare_parameter<int>("baudrate", 2000000);
     port_ = this->get_parameter("port").as_string();
     baud_ = this->get_parameter("baudrate").as_int();
 
-    // シリアルポートオープン
+    // シリアルオープン
     if (!openSerial()) {
-      RCLCPP_FATAL(this->get_logger(), "Cannot open serial port %s", port_.c_str());
+      RCLCPP_FATAL(get_logger(), "Failed to open serial port %s", port_.c_str());
+      rclcpp::shutdown();
       return;
     }
 
-    // １．キャリブレーション要求
-    auto cal_summary = calibrateAll();
-    RCLCPP_INFO(this->get_logger(), "Calibration summary: %s", cal_summary.c_str());
+    // 対象センサ ID リスト
+    const std::vector<uint8_t> ids = {0x0A, 0x0B, 0x0C};
 
-    if (!rclcpp::ok()) {
-      RCLCPP_WARN(this->get_logger(), "Interrupted after calibration");
-      return;
+    // 1) 全センサにキャリブレーション要求
+    {
+      std::ostringstream oss;
+      for (auto id : ids) {
+        bool ok = sendCalibration(id);
+        oss << formatId(id) << ":" << (ok ? "OK" : "FAIL") << "  ";
+      }
+      RCLCPP_INFO(get_logger(), "Calibration results: %s", oss.str().c_str());
     }
 
-    // ２．カウントダウン表示しつつ 60秒待機
-    RCLCPP_INFO(this->get_logger(), "Waiting 60 seconds for sensors to settle...");
+    // 2) 60秒カウントダウン待機
+    RCLCPP_INFO(get_logger(), "Waiting 60 seconds for sensors to settle...");
     for (int sec = 60; sec > 0 && rclcpp::ok(); --sec) {
-      RCLCPP_INFO(this->get_logger(), "  Remaining: %2d seconds", sec);
+      RCLCPP_INFO(get_logger(), "  Remaining: %2d s", sec);
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
-
     if (!rclcpp::ok()) {
-      RCLCPP_WARN(this->get_logger(), "Interrupted during wait");
+      RCLCPP_WARN(get_logger(), "Interrupted during wait");
+      rclcpp::shutdown();
       return;
     }
 
-    // ３．バイタル値要求
-    auto vital_summary = requestVitalsAll();
-    RCLCPP_INFO(this->get_logger(), "Vital request summary: %s", vital_summary.c_str());
+    // 3) 全センサにバイタル値要求
+    {
+      std::ostringstream oss;
+      for (auto id : ids) {
+        bool ok = sendVitalRequest(id);
+        oss << formatId(id) << ":" << (ok ? "OK" : "FAIL") << "  ";
+      }
+      RCLCPP_INFO(get_logger(), "Vital request results: %s", oss.str().c_str());
+    }
+
+    rclcpp::shutdown();
   }
 
-  ~VitalCalibrator()
+  ~VitalRequester()
   {
-    if (fd_ >= 0) close(fd_);
+    if (fd_ >= 0) ::close(fd_);
   }
 
 private:
   bool openSerial()
   {
-    fd_ = open(port_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    fd_ = ::open(port_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
     if (fd_ < 0) return false;
     termios tio{};
     cfmakeraw(&tio);
-    cfsetispeed(&tio, B2000000);
-    cfsetospeed(&tio, B2000000);
+    cfsetispeed(&tio, baud_);
+    cfsetospeed(&tio, baud_);
     tio.c_cflag |= CLOCAL | CREAD;
     tcsetattr(fd_, TCSANOW, &tio);
     return true;
   }
 
-  std::string calibrateAll()
+  bool sendCalibration(uint8_t id)
   {
-    const std::vector<uint8_t> ids = {0x0A, 0x0B, 0x0C};
-    std::ostringstream summary;
-    for (auto id : ids) {
-      if (!rclcpp::ok()) break;
-      bool ok = sendResetCommand(id);
-      summary << formatId(id) << ":" << (ok ? "OK" : "FAIL") << "; ";
+    // [AA C1 ID 00 22 55]
+    std::array<uint8_t,6> cmd = {{0xAA,0xC1,id,0x00,0x22,0x55}};
+    if (::write(fd_, cmd.data(), cmd.size()) != (ssize_t)cmd.size()) {
+      return false;
     }
-    return summary.str();
-  }
-
-  std::string requestVitalsAll()
-  {
-    const std::vector<uint8_t> ids = {0x0A, 0x0B, 0x0C};
-    std::ostringstream summary;
-    for (auto id : ids) {
-      if (!rclcpp::ok()) break;
-      bool ok = sendVitalRequest(id);
-      summary << formatId(id) << ":" << (ok ? "OK" : "FAIL") << "; ";
-    }
-    return summary.str();
-  }
-
-  bool sendResetCommand(uint8_t id)
-  {
-    uint8_t cmd[5] = {0xAA, 0xC1, id, 0x22, 0x55};
-    if (write(fd_, cmd, sizeof(cmd)) != sizeof(cmd)) return false;
-    uint8_t buf[5];
-    ssize_t n = ::read(fd_, buf, sizeof(buf));
-    return (n == sizeof(buf)
-         && buf[0]==0xAA && buf[1]==0xC1
-         && buf[2]==id   && buf[3]==0x00
-         && buf[4]==0x55);
+    // ACK: [AA C1 ID 00 00 55]
+    std::array<uint8_t,6> resp{};
+    ssize_t n = ::read(fd_, resp.data(), resp.size());
+    return n == 6
+        && resp[0]==0xAA && resp[1]==0xC1
+        && resp[2]==id   && resp[3]==0x00
+        && resp[4]==0x00 && resp[5]==0x55;
   }
 
   bool sendVitalRequest(uint8_t id)
   {
-    uint8_t cmd[5] = {0xC1, id, 0x00, 0x20, 0x55};
-    if (write(fd_, cmd, sizeof(cmd)) != sizeof(cmd)) return false;
+    // [AA C1 ID 00 20 55]
+    std::array<uint8_t,6> cmd = {{0xAA,0xC1,id,0x00,0x20,0x55}};
+    if (::write(fd_, cmd.data(), cmd.size()) != (ssize_t)cmd.size()) {
+      return false;
+    }
+    // 任意長応答を読む
     uint8_t buf[32];
     ssize_t n = ::read(fd_, buf, sizeof(buf));
-    return (n > 0);
+    return n > 0;
   }
 
   std::string formatId(uint8_t id)
@@ -134,7 +131,6 @@ private:
 int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<VitalCalibrator>();
-  rclcpp::shutdown();
+  std::make_shared<VitalRequester>();
   return 0;
 }
