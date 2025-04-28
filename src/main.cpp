@@ -134,8 +134,6 @@ private:
 int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);
-  // signal handler は rclcpp::init で設定されるので、
-  // ループ中に rclcpp::ok() をチェックするだけで Ctrl+C が効きます。
   auto node = std::make_shared<VitalCalibrator>();
   rclcpp::shutdown();
   return 0;
