@@ -26,23 +26,35 @@ public:
       return;
     }
 
-    // １．全基盤にキャリブレーション要求
+    // １．キャリブレーション要求
     auto cal_summary = calibrateAll();
     RCLCPP_INFO(this->get_logger(), "Calibration summary: %s", cal_summary.c_str());
 
-    // ２．１分間カウントダウン表示しつつ待機
+    if (!rclcpp::ok()) {
+      RCLCPP_WARN(this->get_logger(), "Interrupted after calibration");
+      return;
+    }
+
+    // ２．カウントダウン表示しつつ 60秒待機
     RCLCPP_INFO(this->get_logger(), "Waiting 60 seconds for sensors to settle...");
-    for (int sec = 60; sec > 0; --sec) {
+    for (int sec = 60; sec > 0 && rclcpp::ok(); --sec) {
       RCLCPP_INFO(this->get_logger(), "  Remaining: %2d seconds", sec);
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
-    // ３．全基盤にバイタル値要求
+    if (!rclcpp::ok()) {
+      RCLCPP_WARN(this->get_logger(), "Interrupted during wait");
+      return;
+    }
+
+    // ３．バイタル値要求
     auto vital_summary = requestVitalsAll();
     RCLCPP_INFO(this->get_logger(), "Vital request summary: %s", vital_summary.c_str());
+  }
 
-    // 処理完了でノード終了
-    rclcpp::shutdown();
+  ~VitalCalibrator()
+  {
+    if (fd_ >= 0) close(fd_);
   }
 
 private:
@@ -63,10 +75,10 @@ private:
   {
     const std::vector<uint8_t> ids = {0x0A, 0x0B, 0x0C};
     std::ostringstream summary;
-    for (size_t i = 0; i < ids.size(); ++i) {
-      bool ok = sendResetCommand(ids[i]);
-      summary << formatId(ids[i]) << ":" << (ok ? "OK" : "FAIL");
-      if (i + 1 < ids.size()) summary << "; ";
+    for (auto id : ids) {
+      if (!rclcpp::ok()) break;
+      bool ok = sendResetCommand(id);
+      summary << formatId(id) << ":" << (ok ? "OK" : "FAIL") << "; ";
     }
     return summary.str();
   }
@@ -75,17 +87,16 @@ private:
   {
     const std::vector<uint8_t> ids = {0x0A, 0x0B, 0x0C};
     std::ostringstream summary;
-    for (size_t i = 0; i < ids.size(); ++i) {
-      bool ok = sendVitalRequest(ids[i]);
-      summary << formatId(ids[i]) << ":" << (ok ? "OK" : "FAIL");
-      if (i + 1 < ids.size()) summary << "; ";
+    for (auto id : ids) {
+      if (!rclcpp::ok()) break;
+      bool ok = sendVitalRequest(id);
+      summary << formatId(id) << ":" << (ok ? "OK" : "FAIL") << "; ";
     }
     return summary.str();
   }
 
   bool sendResetCommand(uint8_t id)
   {
-    // [AA C1 ID 22 55]
     uint8_t cmd[5] = {0xAA, 0xC1, id, 0x22, 0x55};
     if (write(fd_, cmd, sizeof(cmd)) != sizeof(cmd)) return false;
     uint8_t buf[5];
@@ -98,7 +109,6 @@ private:
 
   bool sendVitalRequest(uint8_t id)
   {
-    // [C1 ID 00 20 55]
     uint8_t cmd[5] = {0xC1, id, 0x00, 0x20, 0x55};
     if (write(fd_, cmd, sizeof(cmd)) != sizeof(cmd)) return false;
     uint8_t buf[32];
@@ -124,6 +134,9 @@ private:
 int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);
-  std::make_shared<VitalCalibrator>();
+  // signal handler は rclcpp::init で設定されるので、
+  // ループ中に rclcpp::ok() をチェックするだけで Ctrl+C が効きます。
+  auto node = std::make_shared<VitalCalibrator>();
+  rclcpp::shutdown();
   return 0;
 }
