@@ -5,6 +5,8 @@
 #include <vector>
 #include <iomanip>
 #include <sstream>
+#include <thread>
+#include <chrono>
 
 class VitalCalibrator : public rclcpp::Node
 {
@@ -24,11 +26,22 @@ public:
       return;
     }
 
-    // 起動と同時にキャリブレーション実行
-    std::string summary = calibrateAll();
-    RCLCPP_INFO(this->get_logger(), "Calibration result: %s", summary.c_str());
+    // １．全基盤にキャリブレーション要求
+    auto cal_summary = calibrateAll();
+    RCLCPP_INFO(this->get_logger(), "Calibration summary: %s", cal_summary.c_str());
 
-    // ノードを終了
+    // ２．１分間カウントダウン表示しつつ待機
+    RCLCPP_INFO(this->get_logger(), "Waiting 60 seconds for sensors to settle...");
+    for (int sec = 60; sec > 0; --sec) {
+      RCLCPP_INFO(this->get_logger(), "  Remaining: %2d seconds", sec);
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+
+    // ３．全基盤にバイタル値要求
+    auto vital_summary = requestVitalsAll();
+    RCLCPP_INFO(this->get_logger(), "Vital request summary: %s", vital_summary.c_str());
+
+    // 処理完了でノード終了
     rclcpp::shutdown();
   }
 
@@ -51,12 +64,20 @@ private:
     const std::vector<uint8_t> ids = {0x0A, 0x0B, 0x0C};
     std::ostringstream summary;
     for (size_t i = 0; i < ids.size(); ++i) {
-      uint8_t id = ids[i];
-      bool ok = sendResetCommand(id);
-      summary << "0x"
-              << std::hex << std::uppercase << std::setw(2) << std::setfill('0')
-              << static_cast<int>(id)
-              << ":" << (ok ? "OK" : "FAIL");
+      bool ok = sendResetCommand(ids[i]);
+      summary << formatId(ids[i]) << ":" << (ok ? "OK" : "FAIL");
+      if (i + 1 < ids.size()) summary << "; ";
+    }
+    return summary.str();
+  }
+
+  std::string requestVitalsAll()
+  {
+    const std::vector<uint8_t> ids = {0x0A, 0x0B, 0x0C};
+    std::ostringstream summary;
+    for (size_t i = 0; i < ids.size(); ++i) {
+      bool ok = sendVitalRequest(ids[i]);
+      summary << formatId(ids[i]) << ":" << (ok ? "OK" : "FAIL");
       if (i + 1 < ids.size()) summary << "; ";
     }
     return summary.str();
@@ -64,19 +85,35 @@ private:
 
   bool sendResetCommand(uint8_t id)
   {
+    // [AA C1 ID 22 55]
     uint8_t cmd[5] = {0xAA, 0xC1, id, 0x22, 0x55};
     if (write(fd_, cmd, sizeof(cmd)) != sizeof(cmd)) return false;
-
     uint8_t buf[5];
     ssize_t n = ::read(fd_, buf, sizeof(buf));
-    if (n != sizeof(buf) ||
-        buf[0] != 0xAA || buf[1] != 0xC1 ||
-        buf[2] != id   || buf[3] != 0x00 ||
-        buf[4] != 0x55)
-    {
-      return false;
-    }
-    return true;
+    return (n == sizeof(buf)
+         && buf[0]==0xAA && buf[1]==0xC1
+         && buf[2]==id   && buf[3]==0x00
+         && buf[4]==0x55);
+  }
+
+  bool sendVitalRequest(uint8_t id)
+  {
+    // [C1 ID 00 20 55]
+    uint8_t cmd[5] = {0xC1, id, 0x00, 0x20, 0x55};
+    if (write(fd_, cmd, sizeof(cmd)) != sizeof(cmd)) return false;
+    uint8_t buf[32];
+    ssize_t n = ::read(fd_, buf, sizeof(buf));
+    return (n > 0);
+  }
+
+  std::string formatId(uint8_t id)
+  {
+    std::ostringstream ss;
+    ss << "0x"
+       << std::hex << std::uppercase
+       << std::setw(2) << std::setfill('0')
+       << static_cast<int>(id);
+    return ss.str();
   }
 
   std::string port_;
@@ -87,7 +124,6 @@ private:
 int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);
-  // コンストラクタ内でキャリブレーションと終了を行う
   std::make_shared<VitalCalibrator>();
   return 0;
 }
